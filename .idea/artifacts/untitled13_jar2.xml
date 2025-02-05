@@ -1,0 +1,13 @@
+<component name="ArtifactManager">
+  <artifact type="jar" name="untitled13:jar2">
+    <output-path>$PROJECT_DIR$/out/artifacts/untitled13_jar2</output-path>
+    <root id="archive" name="untitled13.jar">
+      <element id="directory" name="META-INF">
+        <element id="file-copy" path="$USER_HOME$/Downloads/JSON-java-master/JSON-java-master/src/META-INF/MANIFEST.MF" />
+      </element>
+      <element id="module-output" name="untitled13" />
+      <element id="library" level="project" name="java" />
+      <element id="library" level="project" name="java1" />
+    </root>
+  </artifact>
+</component>
