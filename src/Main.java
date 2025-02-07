@@ -2,39 +2,62 @@ import java.io.*;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.sql.*;
-import java.util.Scanner;
+import java.util.*;
 import org.json.JSONObject;
-
-
 
 public class Main {
     private static final String OLLAMA_API_URL = "http://localhost:11434/api/generate";
     private static final String MODEL_NAME = "llama3.2:1b";
     private static final String DB_URL = "jdbc:sqlite:movies.db";
+    private static final String RAG_API_URL = "http://localhost:5000/query";
+    private static final String EXTERNAL_API_KEY = "5b8404295a2e6350004505178ff7670c";// آدرس RAG
+    private static final String EXTERNAL_API_URL = "https://api.themoviedb.org/3/search/movie";
 
     public static void main(String[] args) {
         Scanner scanner = new Scanner(System.in);
 
-        System.out.println("Choose search method: (database, llama)");
+        System.out.println("Choose search method: (database, llama, rag, external)");
         String method = scanner.nextLine().trim().toLowerCase();
 
-        System.out.println("Choose search type: (movie, director, genre, year, rating, actor, language, country, budget, boxoffice)");
+        System.out.println("Choose search type: (movie, director, genre, rating, actor)");
         String searchType = scanner.nextLine().trim().toLowerCase();
 
         System.out.println("Enter search value:");
         String searchValue = scanner.nextLine().trim();
 
-        if (method.equals("database")) {
-            searchFromDatabase(searchType, searchValue);
-        } else if (method.equals("llama")) {
-            try {
-                String result = queryOllama(searchType, searchValue);
-                System.out.println("\nSearch Results:\n" + result);
-            } catch (IOException e) {
-                System.err.println("Error fetching movie recommendation: " + e.getMessage());
-            }
-        } else {
-            System.out.println("Invalid search method.");
+        switch (method) {
+            case "database":
+                searchFromDatabase(searchType, searchValue);
+                break;
+            case "llama":
+                try {
+                    String result = queryOllama(searchType, searchValue);
+                    System.out.println("\nSearch Results:\n" + result);
+                } catch (IOException e) {
+                    System.err.println("Error fetching movie recommendation: " + e.getMessage());
+                }
+                break;
+            case "rag":
+                try {
+                    String ragResult = queryRAG(searchType, searchValue);
+                    System.out.println("\nRAG Search Results:\n" + ragResult);
+                } catch (IOException e) {
+                    System.err.println("Error with RAG search: " + e.getMessage());
+                    System.out.println("Falling back to database search...");
+                    searchFromDatabase(searchType, searchValue);
+                }
+                break;
+            case "external":
+                try {
+                    String externalData = fetchExternalData(searchValue);
+                    String result = queryOllamaWithExternalData(searchValue, externalData);
+                    System.out.println("\nResults Based on External API:\n" + result);
+                } catch (IOException e) {
+                    System.err.println("Error fetching external data: " + e.getMessage());
+                }
+                break;
+            default:
+                System.out.println("Invalid search method.");
         }
 
         scanner.close();
@@ -52,26 +75,11 @@ public class Main {
                 case "genre":
                     searchByGenre(conn, queryValue);
                     break;
-                case "year":
-                    searchByYear(conn, queryValue);
-                    break;
                 case "rating":
                     searchByRating(conn, queryValue);
                     break;
                 case "actor":
                     searchByActor(conn, queryValue);
-                    break;
-                case "language":
-                    searchByLanguage(conn, queryValue);
-                    break;
-                case "country":
-                    searchByCountry(conn, queryValue);
-                    break;
-                case "budget":
-                    searchByBudget(conn, queryValue);
-                    break;
-                case "boxoffice":
-                    searchByBoxOffice(conn, queryValue);
                     break;
                 default:
                     System.out.println("Invalid search type.");
@@ -82,60 +90,115 @@ public class Main {
     }
 
     private static void searchByMovie(Connection conn, String title) throws SQLException {
-        executeQuery(conn, "SELECT * FROM movies WHERE title LIKE ?", "%" + title + "%");
+        String sql = "SELECT tb.primaryTitle, tr.averageRating, nb.primaryName, tp.category " +
+                "FROM title_basics tb " +
+                "LEFT JOIN title_ratings tr ON tb.tconst = tr.tconst " +
+                "LEFT JOIN title_principals tp ON tb.tconst = tp.tconst " +
+                "LEFT JOIN name_basics nb ON tp.nconst = nb.nconst " +
+                "WHERE tb.primaryTitle LIKE ? AND tb.titleType = 'movie'";
+        executeQuery(conn, sql, "%" + title + "%");
     }
 
     private static void searchByDirector(Connection conn, String director) throws SQLException {
-        executeQuery(conn, "SELECT * FROM movies WHERE director LIKE ?", "%" + director + "%");
+        String sql = "SELECT tb.primaryTitle, tr.averageRating, nb.primaryName, tp.category " +
+                "FROM title_basics tb " +
+                "JOIN title_principals tp ON tb.tconst = tp.tconst " +
+                "JOIN name_basics nb ON tp.nconst = nb.nconst " +
+                "LEFT JOIN title_ratings tr ON tb.tconst = tr.tconst " +
+                "WHERE tp.category = 'director' AND nb.primaryName LIKE ? AND tb.titleType = 'movie'";
+        executeQuery(conn, sql, "%" + director + "%");
     }
 
     private static void searchByGenre(Connection conn, String genre) throws SQLException {
-        executeQuery(conn, "SELECT * FROM movies WHERE genre LIKE ?", "%" + genre + "%");
-    }
-
-    private static void searchByYear(Connection conn, String year) throws SQLException {
-        executeQuery(conn, "SELECT * FROM movies WHERE year = ?", year);
+        String sql = "SELECT tb.primaryTitle, tr.averageRating, nb.primaryName, tp.category " +
+                "FROM title_basics tb " +
+                "LEFT JOIN title_ratings tr ON tb.tconst = tr.tconst " +
+                "LEFT JOIN title_principals tp ON tb.tconst = tp.tconst " +
+                "LEFT JOIN name_basics nb ON tp.nconst = nb.nconst " +
+                "WHERE tb.genres LIKE ? AND tb.titleType = 'movie'";
+        executeQuery(conn, sql, "%" + genre + "%");
     }
 
     private static void searchByRating(Connection conn, String rating) throws SQLException {
-        executeQuery(conn, "SELECT * FROM movies WHERE IMDbRating >= ?", rating);
+        String sql = "SELECT tb.primaryTitle, tr.averageRating, nb.primaryName, tp.category " +
+                "FROM title_basics tb " +
+                "JOIN title_ratings tr ON tb.tconst = tr.tconst " +
+                "LEFT JOIN title_principals tp ON tb.tconst = tp.tconst " +
+                "LEFT JOIN name_basics nb ON tp.nconst = nb.nconst " +
+                "WHERE tr.averageRating >= ? AND tb.titleType = 'movie'";
+        executeQuery(conn, sql, rating);
     }
 
     private static void searchByActor(Connection conn, String actor) throws SQLException {
-        executeQuery(conn, "SELECT * FROM movies WHERE actors LIKE ?", "%" + actor + "%");
-    }
-
-    private static void searchByLanguage(Connection conn, String language) throws SQLException {
-        executeQuery(conn, "SELECT * FROM movies WHERE language LIKE ?", "%" + language + "%");
-    }
-
-    private static void searchByCountry(Connection conn, String country) throws SQLException {
-        executeQuery(conn, "SELECT * FROM movies WHERE country LIKE ?", "%" + country + "%");
-    }
-
-    private static void searchByBudget(Connection conn, String budget) throws SQLException {
-        executeQuery(conn, "SELECT * FROM movies WHERE budget >= ?", budget);
-    }
-
-    private static void searchByBoxOffice(Connection conn, String boxOffice) throws SQLException {
-        executeQuery(conn, "SELECT * FROM movies WHERE boxoffice >= ?", boxOffice);
+        String sql = "SELECT tb.primaryTitle, tr.averageRating, nb.primaryName, tp.category " +
+                "FROM title_basics tb " +
+                "JOIN title_principals tp ON tb.tconst = tp.tconst " +
+                "JOIN name_basics nb ON tp.nconst = nb.nconst " +
+                "LEFT JOIN title_ratings tr ON tb.tconst = tr.tconst " +
+                "WHERE tp.category = 'actor' AND nb.primaryName LIKE ? AND tb.titleType = 'movie'";
+        executeQuery(conn, sql, "%" + actor + "%");
     }
 
     private static void executeQuery(Connection conn, String sql, String param) throws SQLException {
+        Map<String, Set<String>> movieCast = new LinkedHashMap<>();
+        Map<String, Double> movieRatings = new HashMap<>();
+
         try (PreparedStatement pstmt = conn.prepareStatement(sql)) {
             pstmt.setString(1, param);
             ResultSet rs = pstmt.executeQuery();
 
             while (rs.next()) {
-                System.out.println("🎬 Title: " + rs.getString("title"));
-                System.out.println("⭐ IMDb Rating: " + rs.getDouble("IMDbRating"));
-                System.out.println("🎭 Actor: " + rs.getString("actors"));
-                System.out.println("🎬 Director: " + rs.getString("director"));
-                System.out.println("🌍 Country: " + rs.getString("country"));
-                System.out.println("💰 Box Office: $" + rs.getDouble("boxoffice") + "M");
+                String title = rs.getString("primaryTitle");
+                double rating = rs.getDouble("averageRating");
+                String name = rs.getString("primaryName");
+                String category = rs.getString("category");
+
+                movieRatings.putIfAbsent(title, rating);
+                if (name != null && category != null) {
+                    movieCast.computeIfAbsent(title, k -> new LinkedHashSet<>()).add(name + " (" + category + ")");
+                }
+            }
+
+            for (Map.Entry<String, Set<String>> entry : movieCast.entrySet()) {
+                System.out.println("🎬 Title: " + entry.getKey());
+                System.out.println("⭐ IMDb Rating: " + movieRatings.getOrDefault(entry.getKey(), 0.0));
+                System.out.println("🎭 Cast & Crew:");
+                entry.getValue().forEach(name -> System.out.println("- " + name));
                 System.out.println("-------------------------");
             }
         }
+    }
+
+    public static String queryRAG(String queryType, String queryValue) throws IOException {
+        URL url = new URL(RAG_API_URL);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("POST");
+        conn.setRequestProperty("Content-Type", "application/json");
+        conn.setDoOutput(true);
+
+        String jsonInputString = "{ \"queryType\": \"" + queryType + "\", \"queryValue\": \"" + queryValue + "\" }";
+
+        try (OutputStream os = conn.getOutputStream()) {
+            byte[] input = jsonInputString.getBytes("utf-8");
+            os.write(input, 0, input.length);
+        }
+
+        BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream(), "utf-8"));
+        StringBuilder fullResponse = new StringBuilder();
+        String responseLine;
+
+        while ((responseLine = br.readLine()) != null) {
+            try {
+                JSONObject json = new JSONObject(responseLine.trim());
+                if (json.has("response")) {
+                    fullResponse.append(json.getString("response"));
+                }
+            } catch (Exception e) {
+                continue;
+            }
+        }
+
+        return fullResponse.toString().trim();
     }
 
     public static String queryOllama(String queryType, String queryValue) throws IOException {
@@ -170,30 +233,81 @@ public class Main {
 
         return fullResponse.toString().trim();
     }
-
-    private static String buildPrompt(String queryType, String queryValue) {
-        switch (queryType) {
+    public static String buildPrompt(String queryType, String queryValue) {
+        String prompt;
+        switch (queryType.toLowerCase()) {
             case "movie":
-                return "Find movies related to: " + queryValue;
-            case "actor":
-                return "List movies starring: " + queryValue;
+                prompt = "Provide detailed information about the movie titled: \"" + queryValue + "\". Include genre, rating, and key cast members.";
+                break;
             case "director":
-                return "List movies directed by: " + queryValue;
+                prompt = "List all movies directed by \"" + queryValue + "\" along with their IMDb ratings and notable actors.";
+                break;
             case "genre":
-                return "List movies in the genre: " + queryValue;
+                prompt = "Recommend popular movies in the \"" + queryValue + "\" genre with brief descriptions and ratings.";
+                break;
             case "rating":
-                return "Find movies with a rating of at least: " + queryValue;
-            case "language":
-                return "Find movies available in language: " + queryValue;
-            case "country":
-                return "Find movies produced in: " + queryValue;
-            case "budget":
-                return "Find movies with a budget over: " + queryValue;
-            case "boxoffice":
-                return "Find movies with a box office over: " + queryValue;
+                prompt = "Find movies with an IMDb rating of at least \"" + queryValue + "\". List the titles and their directors.";
+                break;
+            case "actor":
+                prompt = "List movies starring \"" + queryValue + "\" along with their genres, ratings, and release years.";
+                break;
             default:
-                return "Invalid search type";
+                prompt = "Find information related to: " + queryValue;
         }
+        return prompt;
+    }
+    public static String fetchExternalData(String query) throws IOException {
+        String urlStr = EXTERNAL_API_URL + "?api_key=" + EXTERNAL_API_KEY + "&query=" + query.replace(" ", "%20");
+        URL url = new URL(urlStr);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("GET");
+
+        BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+        StringBuilder response = new StringBuilder();
+        String line;
+
+        while ((line = br.readLine()) != null) {
+            response.append(line);
+        }
+        br.close();
+
+        return response.toString();
+    }
+
+    // 2️⃣ ارسال اطلاعات ترکیبی به Ollama
+    public static String queryOllamaWithExternalData(String userQuery, String tmdbData) throws IOException {
+        URL url = new URL(OLLAMA_API_URL);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("POST");
+        conn.setRequestProperty("Content-Type", "application/json");
+        conn.setDoOutput(true);
+
+        // ساخت پرامپت ترکیبی
+        String prompt = "User Query: " + userQuery + "\nTMDb Data: " + tmdbData;
+        String jsonInputString = "{ \"model\": \"" + MODEL_NAME + "\", \"prompt\": \"" + prompt.replace("\"", "\\\"") + "\" }";
+
+        try (OutputStream os = conn.getOutputStream()) {
+            byte[] input = jsonInputString.getBytes("utf-8");
+            os.write(input, 0, input.length);
+        }
+
+        BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream(), "utf-8"));
+        StringBuilder fullResponse = new StringBuilder();
+        String responseLine;
+
+        while ((responseLine = br.readLine()) != null) {
+            try {
+                JSONObject json = new JSONObject(responseLine.trim());
+                if (json.has("response")) {
+                    fullResponse.append(json.getString("response"));
+                }
+            } catch (Exception e) {
+                continue;
+            }
+        }
+
+        return fullResponse.toString().trim();
     }
 }
+
 
